@@ -1,0 +1,36 @@
+# Security / Environment
+# Every .env variant, not a list of names: .env.prod / .env.vps hold the same
+# secrets and an operator naming one of those must not have to remember to add it
+# here. Matches .dockerignore, which already covers the family.
+.env
+.env.*
+!.env.example
+settings.local.json
+*.local.json
+
+# SSH deploy keys — NEVER commit these (see INSTALL.md: ./ssh/id_ed25519).
+ssh/
+*.pem
+id_ed25519*
+id_rsa*
+*_ed25519
+*_rsa
+known_hosts
+
+# Local stack definition — copy docker-compose.yml.example and adapt it to your
+# host (ports, memory limits). The .example file is the tracked one.
+docker-compose.yml
+
+# Docker Volumes & Caches
+vault-data/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.venv_*/
+.pytest_cache/
+# System
+.DS_Store
+**/.DS_Store

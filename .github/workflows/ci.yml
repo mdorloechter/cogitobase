@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref to save runner minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        # The full requirements set. google-genai is required even for the
+        # "unit" suite because tests/test_multimodal.py imports google.genai
+        # via vault.index_pdf_file / index_markdown_file.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run unit tests
+        # AUTH_TOKEN is intentionally unset — config.py detects pytest and falls
+        # back to a dummy token, so no secret is needed on the runner.
+        run: pytest -q
+
+      - name: E2E — server boot + auth middleware
+        run: python tests/e2e_server.py
+
+      - name: E2E — search pipeline (offline stub embedder)
+        # e2e_search.py forces a deterministic StubEmbedder + in-memory Qdrant,
+        # so this needs no model download and no network.
+        run: python tests/e2e_search.py
+
+      - name: E2E — Streamable HTTP handshake
+        # Boots the real server via uvicorn and drives a full MCP protocol
+        # handshake (initialize + tools/list + tool call) over the /mcp transport.
+        # Sets its own AUTH_TOKEN and needs no external services.
+        run: python tests/e2e_streamable.py
+
+  audit:
+    # Separate job, not a step on `test`: a dependency advisory and a test
+    # failure are different signals and neither should mask the other.
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Audit pinned dependencies
+        # Fails the build on a known advisory, so a stale pin surfaces here
+        # instead of in a release. Bump the pin (or add an --ignore-vuln with a
+        # rationale) to clear it.
+        run: |
+          python -m pip install --upgrade pip pip-audit
+          pip-audit -r requirements.txt

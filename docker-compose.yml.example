@@ -1,0 +1,83 @@
+services:
+  mcp-server:
+    build: .
+    container_name: cogitobase
+    restart: unless-stopped
+    # SIGTERM triggers server.py's lifespan shutdown, which waits up to 30s to
+    # drain git_sync's queue before exiting. This must exceed that window, or
+    # Docker's SIGKILL can cut the drain short.
+    stop_grace_period: 40s
+    # Uncomment and size for your host — ADR 12 targets VPS instances as small
+    # as 1GB RAM total (shared with qdrant below). Example for a 1GB host:
+    # mem_limit: 512m
+    # cpus: "1.0"
+    expose:
+      - "8000"
+    # Bound to LOOPBACK, not 0.0.0.0: the reverse proxy that terminates TLS is the
+    # first line of defence (README §5), and it runs on the same host. This is what
+    # makes the Quickstart's `curl localhost:8000/healthz` work; without it the port
+    # is reachable only from inside the compose network. Publishing on 0.0.0.0 would
+    # expose the MCP endpoint directly, bypassing the proxy.
+    # /healthz and /readyz are unauthenticated by design — see SECURITY.md.
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      # Unauthenticated liveness probe (see /healthz in server.py).
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+    # Forward the whole .env so every knob (GEMINI_API_KEY, EMBED_MODEL, vault
+    # enforcement, rate limits, …) reaches the app — not just a hand-picked few.
+    # Secrets stay in .env (git-ignored) and are injected at runtime, never baked
+    # into image layers.
+    env_file:
+      - .env
+    environment:
+      # QDRANT_HOST is fixed to the compose service name, so it overrides any .env value.
+      - QDRANT_HOST=qdrant
+      # The git token does NOT live here. Auth happens via the SSH key mounted
+      # below (GIT_REPO_URL uses an ssh:// / git@ URL), not via an env token.
+    volumes:
+      - ./vault-data:/app/vault-data
+      # Read-only SSH deploy key + known_hosts so git push/pull authenticates
+      # without a token in the URL. Provide ./ssh/{id_ed25519,known_hosts} on the host.
+      - ./ssh:/home/mcpuser/.ssh:ro
+    depends_on:
+      qdrant:
+        # Don't boot the app until Qdrant actually accepts connections, so the
+        # startup embedder/collection setup doesn't race a not-yet-ready store.
+        condition: service_healthy
+    networks:
+      - internal_stack
+
+  qdrant:
+    image: qdrant/qdrant:v1.18.2
+    container_name: qdrant-memory
+    restart: unless-stopped
+    # Uncomment and size for your host — see the mcp-server service's comment
+    # above. Example for a 1GB host:
+    # mem_limit: 384m
+    # cpus: "1.0"
+    expose:
+      - "6333"
+    healthcheck:
+      # TCP liveness via bash's /dev/tcp (no curl/wget in the image). The qdrant
+      # image is Debian-based, so bash is available.
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/6333'"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    volumes:
+      - qdrant_data:/qdrant/storage
+    networks:
+      - internal_stack
+
+volumes:
+  qdrant_data:
+
+networks:
+  internal_stack:
+    driver: bridge

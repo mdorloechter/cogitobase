@@ -1,0 +1,44 @@
+# Keep secrets and local state OUT of the Docker build context so they can never
+# be baked into an image layer. Runtime config is injected via env_file/volumes.
+
+# Secrets & environment
+.env
+.env.*
+!.env.example
+ssh/
+*.pem
+id_ed25519*
+id_rsa*
+*_ed25519
+*_rsa
+known_hosts
+
+# Local data & caches (mounted at runtime, not built in)
+vault-data/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.venv_*/
+.pytest_cache/
+
+# Version control & CI
+.git/
+.github/
+.gitignore
+
+# Docs & dev-only files (not needed inside the image).
+# NOTE: seed-skills/*.md ARE needed at runtime (skills.seed_skills), so the
+# broad *.md exclude must not swallow them — re-include that directory.
+*.md
+!README.md
+!seed-skills/
+!seed-skills/**
+tests/
+.claude/
+
+# OS cruft
+.DS_Store
+**/.DS_Store
