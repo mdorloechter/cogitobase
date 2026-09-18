@@ -127,13 +127,6 @@ async def handle_mcp(scope, receive, send):
     """ASGI entry point for the Streamable HTTP transport (mounted at /mcp)."""
     if session_manager is None:
         raise RuntimeError("MCP session manager not started (lifespan not entered).")
-    # Mount("/mcp") strips "/mcp", leaving scope["path"] == "" when /mcp is requested
-    # without a trailing slash. The session manager defines its routes at "/", so an
-    # empty path triggers a 307 redirect in Starlette. Normalizing "" to "/" serves
-    # /mcp directly without any redirect.
-    if scope["type"] == "http" and scope.get("path") == "":
-        scope = dict(scope)
-        scope["path"] = "/"
     await session_manager.handle_request(scope, receive, send)
 
 
