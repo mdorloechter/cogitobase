@@ -243,6 +243,34 @@ def banner(w, h, word_size, dark=False):
     return svg(w, h, body, defs, LABEL)
 
 
+def sticker(dark=False):
+    """A vertical lockup suitable for a notebook sticker."""
+    medium = _font("Roboto-Medium.ttf")
+    word_size = 150
+    track = 0.004
+    ww = text_width(medium, WORD, word_size, track)
+    scale = word_size / 152
+    d = 2 * RADIUS * scale
+    
+    gap = word_size * 0.4
+    content_w = max(d, ww)
+    content_h = d + gap + word_size * 1.4
+    
+    side = max(content_w, content_h) + word_size
+    
+    cx = side / 2
+    cy = (side - content_h) / 2 + d / 2 + word_size * 0.4
+    
+    text_x = cx - ww / 2
+    base = cy + d / 2 + gap + word_size * 0.75
+    word, _ = text_path(medium, WORD, word_size, text_x, base, track)
+    
+    c = (lambda x: DARK[x]) if dark else (lambda x: x)
+    body = (mark(cx, cy, scale, dark=dark, node_scale=1.0)
+            + f'\n  <path d="{word}" fill="{c(INK)}"/>')
+    return svg(round(side), round(side), body, gradient(dark), LABEL)
+
+
 # name -> (svg source, png widths). The banner is exported at 2x its layout width so
 # it stays sharp on a HiDPI screen at the width the README displays it.
 ASSETS = {
@@ -254,6 +282,8 @@ ASSETS = {
     "lockup-dark": (lambda: lockup(dark=True), [800]),
     "header": (lambda: banner(1600, 460, 140), [1600]),
     "social-preview": (lambda: banner(1280, 640, 124), [1280]),
+    "sticker": (lambda: sticker(), [800]),
+    "sticker-dark": (lambda: sticker(dark=True), [800]),
 }
 
 
