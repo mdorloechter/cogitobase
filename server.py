@@ -16,6 +16,7 @@ from starlette.routing import Route, Mount
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from mcp.server import Server
 from mcp.types import (
@@ -207,6 +208,21 @@ def _token_matches(auth_header: str) -> bool:
 _PROTECTED_PREFIXES = ("/mcp", "/metrics")
 
 
+class McpPathMiddleware:
+    """Rewrite /mcp to /mcp/ so Starlette's Mount matches fully without a 307 redirect."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope.get("path") == "/mcp":
+            scope = dict(scope)
+            scope["path"] = "/mcp/"
+            if "raw_path" in scope:
+                scope["raw_path"] = b"/mcp/"
+        await self.app(scope, receive, send)
+
+
 class ProtectionMiddleware(BaseHTTPMiddleware):
     """Request correlation + auth + ingress DoS protection + HTTP metrics."""
 
@@ -328,10 +344,20 @@ starlette_app = Starlette(
         Route("/healthz", endpoint=healthz, methods=["GET"]),
         Route("/readyz", endpoint=readyz, methods=["GET"]),
     ],
-    middleware=[Middleware(ProtectionMiddleware)],
+    middleware=[
+        Middleware(ProxyHeadersMiddleware, trusted_hosts="*"),
+        Middleware(McpPathMiddleware),
+        Middleware(ProtectionMiddleware),
+    ],
     lifespan=lifespan,
 )
 
 
 if __name__ == "__main__":
-    uvicorn.run(starlette_app, host="0.0.0.0", port=8000)
+    uvicorn.run(
+        starlette_app,
+        host="0.0.0.0",
+        port=8000,
+        proxy_headers=True,
+        forwarded_allow_ips="*",
+    )

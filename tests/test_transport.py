@@ -713,3 +713,38 @@ def test_dns_rebinding_protection_off_by_default(monkeypatch):
         enable_dns_rebinding_protection=bool(config.MCP_ALLOWED_HOSTS or config.MCP_ALLOWED_ORIGINS),
         allowed_hosts=config.MCP_ALLOWED_HOSTS, allowed_origins=config.MCP_ALLOWED_ORIGINS)
     assert s2.enable_dns_rebinding_protection is True
+
+
+def test_mcp_post_no_trailing_slash_does_not_redirect(monkeypatch):
+    """Calling /mcp without trailing slash must be handled directly and not 307-redirect to /mcp/."""
+    import server
+    from starlette.testclient import TestClient
+    monkeypatch.setattr(git_sync, "init_git_repo", lambda: None)
+    auth = {"Authorization": f"Bearer {config.AUTH_TOKEN}"}
+    with TestClient(server.starlette_app, follow_redirects=False) as client:
+        r = client.post("/mcp", headers=auth, json={"jsonrpc": "2.0", "method": "ping", "id": 1})
+        assert r.status_code != 307
+        assert "location" not in r.headers
+
+
+def test_proxy_headers_forwarded_proto_scheme(monkeypatch):
+    """ProxyHeadersMiddleware updates request scheme to https when X-Forwarded-Proto is provided."""
+    import server
+    from starlette.testclient import TestClient
+    monkeypatch.setattr(git_sync, "init_git_repo", lambda: None)
+    captured_scheme = None
+
+    async def probe(request):
+        nonlocal captured_scheme
+        captured_scheme = request.url.scheme
+        from starlette.responses import PlainTextResponse
+        return PlainTextResponse("ok")
+
+    from starlette.routing import Route
+    server.starlette_app.routes.append(Route("/scheme-probe", endpoint=probe))
+    try:
+        with TestClient(server.starlette_app) as client:
+            client.get("/scheme-probe", headers={"x-forwarded-proto": "https"})
+            assert captured_scheme == "https"
+    finally:
+        server.starlette_app.routes.pop()
