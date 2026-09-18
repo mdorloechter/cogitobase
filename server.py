@@ -16,6 +16,7 @@ from starlette.routing import Route, Mount
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from mcp.server import Server
 from mcp.types import (
@@ -126,6 +127,13 @@ async def handle_mcp(scope, receive, send):
     """ASGI entry point for the Streamable HTTP transport (mounted at /mcp)."""
     if session_manager is None:
         raise RuntimeError("MCP session manager not started (lifespan not entered).")
+    # Mount("/mcp") strips "/mcp", leaving scope["path"] == "" when /mcp is requested
+    # without a trailing slash. The session manager defines its routes at "/", so an
+    # empty path triggers a 307 redirect in Starlette. Normalizing "" to "/" serves
+    # /mcp directly without any redirect.
+    if scope["type"] == "http" and scope.get("path") == "":
+        scope = dict(scope)
+        scope["path"] = "/"
     await session_manager.handle_request(scope, receive, send)
 
 
@@ -328,10 +336,19 @@ starlette_app = Starlette(
         Route("/healthz", endpoint=healthz, methods=["GET"]),
         Route("/readyz", endpoint=readyz, methods=["GET"]),
     ],
-    middleware=[Middleware(ProtectionMiddleware)],
+    middleware=[
+        Middleware(ProxyHeadersMiddleware, trusted_hosts="*"),
+        Middleware(ProtectionMiddleware),
+    ],
     lifespan=lifespan,
 )
 
 
 if __name__ == "__main__":
-    uvicorn.run(starlette_app, host="0.0.0.0", port=8000)
+    uvicorn.run(
+        starlette_app,
+        host="0.0.0.0",
+        port=8000,
+        proxy_headers=True,
+        forwarded_allow_ips="*",
+    )
