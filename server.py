@@ -215,6 +215,21 @@ def _token_matches(auth_header: str) -> bool:
 _PROTECTED_PREFIXES = ("/mcp", "/metrics")
 
 
+class McpPathMiddleware:
+    """Rewrite /mcp to /mcp/ so Starlette's Mount matches fully without a 307 redirect."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope.get("path") == "/mcp":
+            scope = dict(scope)
+            scope["path"] = "/mcp/"
+            if "raw_path" in scope:
+                scope["raw_path"] = b"/mcp/"
+        await self.app(scope, receive, send)
+
+
 class ProtectionMiddleware(BaseHTTPMiddleware):
     """Request correlation + auth + ingress DoS protection + HTTP metrics."""
 
@@ -338,6 +353,7 @@ starlette_app = Starlette(
     ],
     middleware=[
         Middleware(ProxyHeadersMiddleware, trusted_hosts="*"),
+        Middleware(McpPathMiddleware),
         Middleware(ProtectionMiddleware),
     ],
     lifespan=lifespan,

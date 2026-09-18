@@ -734,11 +734,11 @@ def test_proxy_headers_forwarded_proto_scheme(monkeypatch):
     monkeypatch.setattr(git_sync, "init_git_repo", lambda: None)
     captured_scheme = None
 
-    async def probe(scope, receive, send):
+    async def probe(request):
         nonlocal captured_scheme
-        captured_scheme = scope.get("scheme")
+        captured_scheme = request.url.scheme
         from starlette.responses import PlainTextResponse
-        await PlainTextResponse("ok")(scope, receive, send)
+        return PlainTextResponse("ok")
 
     from starlette.routing import Route
     server.starlette_app.routes.append(Route("/scheme-probe", endpoint=probe))
