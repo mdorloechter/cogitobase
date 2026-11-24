@@ -1,0 +1,15 @@
+# Dependabot security updates are enabled in the repository settings. This file
+# only shapes them; `open-pull-requests-limit: 0` keeps routine version-update
+# PRs off, so nothing but security fixes is proposed (as before this file existed).
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 0
+    ignore:
+      # mcp 2.x is a hard API fork and the session-less protocol era — a
+      # migration, not a bump (ARCHITECTURE.md ADR 15). Fixes within 1.x still come.
+      - dependency-name: "mcp"
+        update-types: ["version-update:semver-major"]
