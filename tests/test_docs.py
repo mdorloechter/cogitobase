@@ -221,22 +221,25 @@ def test_the_protocol_revision_adr_15_claims_is_the_one_the_sdk_speaks():
         f"INSTALL.md does not tell an operator which revision ({claimed.group(1)}) is served"
 
 
-def test_the_pin_adr_15_rests_on_is_the_pin_requirements_actually_carries():
-    """ADR 15's whole argument is the exact pin: `pip install mcp` resolves to a line that
-    speaks a different protocol era, so the version is the only thing holding the era in
-    place.
+def test_the_mcp_pin_stays_on_the_major_line_adr_15_rests_on():
+    """ADR 15 rests on the SDK's major line: `mcp` 1.x speaks the initialization era,
+    2.x is a hard fork that also serves the session-less one, and `pip install mcp`
+    resolves to 2.x. A pin that leaves 1.x would falsify the ADR without touching it, and
+    the failure would not surface at install time — it surfaces as a changed server.
 
-    A range or a bump would falsify the ADR without touching it, and the failure would
-    not surface at install time — it surfaces as a client that no longer connects. So the
-    ADR must name the pin, and requirements.txt must carry exactly that.
+    Deliberately NOT the exact version: tying the ADR to a patch release made every
+    security bump inside 1.x a change to the architecture doc, and the security bumps
+    stalled on it. The exact pin in requirements.txt is for reproducible builds, which
+    holds for every dependency and is not this ADR's concern.
     """
     root = Path(__file__).resolve().parent.parent
     pinned = re.search(r"^mcp==(\S+)$",
                        (root / "requirements.txt").read_text(encoding="utf-8"), re.MULTILINE)
     assert pinned, "requirements.txt no longer pins mcp to an exact version"
-    assert f"`mcp=={pinned.group(1)}`" in _adr_15(), (
-        f"ADR 15 does not name the pin it rests on — requirements.txt has "
-        f"mcp=={pinned.group(1)}")
+    assert "`mcp<2`" in _adr_15(), "ADR 15 no longer names the major line it rests on"
+    assert pinned.group(1).split(".")[0] == "1", (
+        f"requirements.txt pins mcp=={pinned.group(1)}, outside the 1.x line ADR 15 rests "
+        f"on. Moving to 2.x is a migration with its own ADR, not a dependency bump.")
     assert importlib.metadata.version("mcp") == pinned.group(1), (
         f"the installed mcp is {importlib.metadata.version('mcp')}, not the pinned "
         f"{pinned.group(1)}")
