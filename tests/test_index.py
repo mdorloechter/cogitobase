@@ -588,9 +588,9 @@ async def test_two_concurrent_reindexes_embed_the_vault_once(monkeypatch, tmp_pa
     def slow_index(f):
         seen.append(f)
         time.sleep(0.02)     # hold the lock long enough for the second call to land
-        return True
+        return None
 
-    monkeypatch.setattr(vault, "index_markdown_file", slow_index)
+    monkeypatch.setattr(vault, "_try_index_markdown", slow_index)
 
     first, second = await _asyncio.gather(call("reindex_vault", {}), call("reindex_vault", {}))
 

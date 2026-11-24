@@ -345,7 +345,7 @@ In total, the server registers **27 tools** across six groups.
 | `rename_note` | Rename (overwrite protection, index update; names the notes whose `[[old-name]]` links it leaves dangling — it rewrites no other note) |
 | `delete_note` | Delete (from Git + Index) |
 | `upload_media` | Upload images/PDFs (Base64) → indexed natively in Qdrant (Media Vault); `MAX_MEDIA_BYTES` decoded, but see the ingress cap |
-| `reindex_vault` | Rebuild the whole semantic index from the Markdown vault (recovery after Qdrant data loss); one rebuild at a time |
+| `reindex_vault` | Rebuild the whole semantic index from the Markdown vault (recovery after Qdrant data loss); one rebuild at a time. Failed files are listed with error class (`embedding`, `qdrant`, `read`, `internal`), a one-line reason and whether a retry can help (first 20, then a count). The write tools name the same reason when a saved note could not be indexed |
 
 > **Addressing one note.** `read_note`, `append_to_note`, `rename_note` and `delete_note` take a bare filename (`roadmap.md`). Since the folder carries the type, several notes may legitimately share a basename — such a name is refused with the candidates as vault-qualified paths (`brain-vault/projects/roadmap.md`), which the client resends to pick one. `search_vault` and `list_notes` already name notes that way, so search/list → read needs no extra round trip; the dedup notice names its near-duplicate in the same form. `write_note`/`rename_note` report in their notices when they leave a name shared by several notes, and a `[[title]]` matching several notes is never auto-linked.
 

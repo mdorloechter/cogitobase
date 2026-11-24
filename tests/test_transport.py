@@ -366,8 +366,7 @@ _SUCCESS_REPLIES = {
     'text(f"Deleted {filepath.name}")',
     # upload_media: the file IS written and committed; a failed index is counted by
     # mcp_index_failures_total and repaired by reindex_vault, as in write_note.
-    'text(f"Uploaded, but indexing failed: {filepath.name}. The file is saved "'
-    ' f"but not searchable yet; check server logs or retry via reindex_vault.")',
+    'text(f"Uploaded {filepath.name}. {_failure_notice(failure, \'the file is\')}")',
     'text(f"Uploaded and indexed PDF successfully: {filepath.name}. You can link it using: [PDF](../media/{filepath.name})")',
     'text(f"Uploaded and indexed successfully. You can link it in markdown using: ![alt text](../media/{filepath.name})")',
     # memory.py — query answers and write confirmations

@@ -380,7 +380,7 @@ def test_reindex_skips_symlinked_notes(tmp_path, monkeypatch):
     real.write_text("real body", encoding="utf-8")
 
     seen = []
-    monkeypatch.setattr(vault, "index_markdown_file", lambda f: seen.append(f) or True)
+    monkeypatch.setattr(vault, "_try_index_markdown", lambda f: seen.append(f))
     monkeypatch.setattr(config, "MEDIA_DIR", tmp_path / "media")  # absent → skipped
     vault._reindex_all()
 

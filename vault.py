@@ -12,9 +12,15 @@ from pathlib import Path
 from typing import NamedTuple
 
 import frontmatter
+import httpx
+from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 from qdrant_client.models import (
     PointStruct, Filter, FieldCondition, MatchValue, IsEmptyCondition, PayloadField, Range,
 )
+try:
+    from google.genai import errors as _genai_errors
+except ImportError:          # the light test subset runs without google-genai
+    _genai_errors = None
 
 import config
 import clients
@@ -503,17 +509,88 @@ def _drop_chunks_from(filepath: Path, first_idx: int) -> None:
     )
 
 
+class IndexFailure(NamedTuple):
+    """Why one file could not be indexed, in a form an MCP client can act on.
+
+    The client cannot read the server log, so "failed — see server log" leaves it
+    unable to tell a depleted embedding quota (wait, top up, retry) from a file it
+    should fix (#8). `retryable` draws exactly that line: True when the file is fine
+    and a later attempt can succeed, False when retrying alone changes nothing.
+    """
+    kind: str         # embedding | qdrant | read | internal
+    message: str      # one line, capped; the traceback stays in the server log
+    retryable: bool
+
+    def __str__(self) -> str:
+        return f"{self.kind}: {self.message}" + (" (retryable)" if self.retryable else "")
+
+
+_REASON_MAX = 160
+# 402: prepaid credits depleted; 408: timeout; 429: rate limit. None of them is the
+# file's fault. 400 (bad request) and 401/403 (bad key) fail the same way on retry.
+_RETRYABLE_HTTP = {402, 408, 429}
+
+
+def _one_line(value: object, limit: int = _REASON_MAX) -> str:
+    """`value` as a single line of at most `limit` characters."""
+    s = " ".join(str(value).split())
+    return s if len(s) <= limit else s[:limit - 1] + "…"
+
+
+def _classify(exc: Exception) -> IndexFailure:
+    """Map an indexing exception to an IndexFailure. Read errors are classified at
+    the read itself, so everything reaching here happened while embedding or storing."""
+    if _genai_errors is not None and isinstance(exc, _genai_errors.APIError):
+        code = exc.code or 0
+        msg = f"{code} {exc.status}: {_one_line(exc.message, 120)}"
+        if code == 402:
+            # Retryable (the file is fine), but an immediate retry fails the same way.
+            msg += " (credits depleted — top up before retrying)"
+        return IndexFailure("embedding", msg, code in _RETRYABLE_HTTP or code >= 500)
+    if isinstance(exc, (UnexpectedResponse, ResponseHandlingException)):
+        return IndexFailure("qdrant", _one_line(exc), True)
+    if isinstance(exc, httpx.TransportError):
+        # Qdrant wraps its own transport errors (above); a raw one is the embedding call.
+        return IndexFailure("embedding", _one_line(f"{type(exc).__name__}: {exc}"), True)
+    return IndexFailure("internal", _one_line(f"{type(exc).__name__}: {exc}"), False)
+
+
+def _read_failure(exc: Exception) -> IndexFailure:
+    """A file that cannot be read or decoded: the file is the problem, not a service."""
+    return IndexFailure("read", _one_line(f"{type(exc).__name__}: {exc}"), False)
+
+
 def index_markdown_file(filepath: Path) -> bool:
+    """True if indexed or skipped (embedder/Qdrant offline), False if it failed."""
+    return _try_index_markdown(filepath) is None
+
+
+def index_pdf_file(filepath: Path) -> bool:
+    """True if indexed or skipped (embedder/Qdrant offline), False if it failed."""
+    return _try_index_pdf(filepath) is None
+
+
+def index_image_file(filepath: Path) -> bool:
+    """True if indexed or skipped (offline, or not an image), False if it failed."""
+    return _try_index_image(filepath) is None
+
+
+def _try_index_markdown(filepath: Path) -> IndexFailure | None:
     """Chunk the document and upsert one point per chunk with a vault tag.
 
-    Returns True if indexed (or skipped because embedder/Qdrant are offline —
-    that state is already surfaced elsewhere), False if indexing was attempted
-    and failed.
+    Returns None if indexed (or skipped because embedder/Qdrant are offline —
+    that state is already surfaced elsewhere), else why indexing failed.
     """
     if not clients.embedder or not clients.qdrant_db:
-        return True
+        return None
     try:
-        content = _body_without_frontmatter(filepath.read_text(encoding="utf-8"))
+        raw = filepath.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        log.exception("Indexing failed for %s", filepath)
+        _M_INDEX_FAIL.inc(("markdown",))
+        return _read_failure(exc)
+    try:
+        content = _body_without_frontmatter(raw)
         chunks = chunk_text(content)
         vault = _vault_of(filepath)
 
@@ -557,7 +634,8 @@ def index_markdown_file(filepath: Path) -> bool:
             log.error("Embedder returned %d vectors for %d chunks in %s — refusing "
                       "to index a partial note.", len(embeddings), len(chunks), filepath)
             _M_INDEX_FAIL.inc(("markdown",))
-            return False
+            return IndexFailure("embedding", f"embedder returned {len(embeddings)} vectors "
+                                             f"for {len(chunks)} chunks", True)
         points = []
         # `path` is what identifies this note's points: two notes can share a
         # basename (a concept and a project both called roadmap.md), and deleting
@@ -576,28 +654,34 @@ def index_markdown_file(filepath: Path) -> bool:
         # would republish the plaintext of a note that no longer exists.
         if not is_contained_file(filepath, config.VAULT_ROOT):
             log.info("Skipping index upsert for %s — no longer a contained file", filepath)
-            return True
+            return None
         clients.qdrant_db.upsert(collection_name=config.COLLECTION_NAME, points=points)
         # Then drop the surplus tail, so a shrunken note stops serving removed prose.
         _drop_chunks_from(filepath, len(chunks))
-        return True
-    except Exception:
+        return None
+    except Exception as exc:
         log.exception("Indexing failed for %s", filepath)
         _M_INDEX_FAIL.inc(("markdown",))
-        return False
+        return _classify(exc)
 
 
-def index_pdf_file(filepath: Path) -> bool:
+def _try_index_pdf(filepath: Path) -> IndexFailure | None:
     """Index a PDF file natively using Gemini.
 
-    Returns True if indexed (or skipped because embedder/Qdrant are offline),
-    False if indexing was attempted and failed.
+    Returns None if indexed (or skipped because embedder/Qdrant are offline),
+    else why indexing failed.
     """
     if not clients.embedder or not clients.qdrant_db:
-        return True
+        return None
+    try:
+        data = filepath.read_bytes()
+    except OSError as exc:
+        log.exception("Indexing failed for PDF %s", filepath)
+        _M_INDEX_FAIL.inc(("pdf",))
+        return _read_failure(exc)
     try:
         from google.genai import types
-        part = types.Part.from_bytes(data=filepath.read_bytes(), mime_type="application/pdf")
+        part = types.Part.from_bytes(data=data, mime_type="application/pdf")
         with timer(_M_EMBED):
             # Use RETRIEVAL_DOCUMENT like markdown/image indexing (asymmetric to the
             # RETRIEVAL_QUERY search vectors) for consistent ranking.
@@ -610,28 +694,34 @@ def index_pdf_file(filepath: Path) -> bool:
             payload={"filename": filepath.name, "vault": "media", "chunk_idx": 0, "text": f"PDF Document: {filepath.name}"}
         )]
         clients.qdrant_db.upsert(collection_name=config.COLLECTION_NAME, points=points)
-        return True
-    except Exception:
+        return None
+    except Exception as exc:
         log.exception("Indexing failed for PDF %s", filepath)
         _M_INDEX_FAIL.inc(("pdf",))
-        return False
+        return _classify(exc)
 
 
-def index_image_file(filepath: Path) -> bool:
+def _try_index_image(filepath: Path) -> IndexFailure | None:
     """Index a standalone image natively using Gemini, so `vault='media'` image
     search returns uploaded images.
 
-    Returns True if indexed (or skipped — offline, or not an image), False if
-    indexing was attempted and failed.
+    Returns None if indexed (or skipped — offline, or not an image), else why
+    indexing failed.
     """
     if not clients.embedder or not clients.qdrant_db:
-        return True
+        return None
+    mime_type, _ = mimetypes.guess_type(filepath.name)
+    if not (mime_type and mime_type.startswith("image/")):
+        return None
     try:
-        mime_type, _ = mimetypes.guess_type(filepath.name)
-        if not (mime_type and mime_type.startswith("image/")):
-            return True
+        data = filepath.read_bytes()
+    except OSError as exc:
+        log.exception("Indexing failed for image %s", filepath)
+        _M_INDEX_FAIL.inc(("image",))
+        return _read_failure(exc)
+    try:
         from google.genai import types
-        part = types.Part.from_bytes(data=filepath.read_bytes(), mime_type=mime_type)
+        part = types.Part.from_bytes(data=data, mime_type=mime_type)
         with timer(_M_EMBED):
             embeddings = _embed([[part, f"Image: {filepath.name}"]], task_type="RETRIEVAL_DOCUMENT")
         points = [PointStruct(
@@ -641,11 +731,11 @@ def index_image_file(filepath: Path) -> bool:
                      "text": f"Image: {filepath.name}"},
         )]
         clients.qdrant_db.upsert(collection_name=config.COLLECTION_NAME, points=points)
-        return True
-    except Exception:
+        return None
+    except Exception as exc:
         log.exception("Indexing failed for image %s", filepath)
         _M_INDEX_FAIL.inc(("image",))
-        return False
+        return _classify(exc)
 
 
 def deindex_markdown_file(filepath: Path):
@@ -682,14 +772,24 @@ def deindex_markdown_file(filepath: Path):
         log.exception("Deindexing failed for %s", filepath)
 
 
-def _reindex_all() -> tuple[int, int]:
+def _failure_path(f: Path) -> str:
+    """How a failed file is named to the client: vault-qualified for a note (what
+    read_note takes back), `<media folder>/<name>` for an uploaded file."""
+    try:
+        return (Path(config.MEDIA_DIR.name) / f.relative_to(config.MEDIA_DIR)).as_posix()
+    except ValueError:
+        return vault_qualified_path(f)
+
+
+def _reindex_all() -> tuple[int, list[tuple[str, IndexFailure]]]:
     """Rebuild the entire Qdrant index from the Markdown vault + media — the source
-    of truth. Returns (indexed_files, failed_files). This is the supported recovery
-    path after losing the Qdrant volume.
+    of truth. Returns (indexed_files, [(path, failure), ...]). This is the supported
+    recovery path after losing the Qdrant volume.
 
     A dimension change (EMBED_MODEL/EMBED_DIM) needs the collection dropped first —
     Qdrant refuses vectors of the wrong size, so every upsert here would fail."""
-    indexed = failed = 0
+    indexed = 0
+    failed: list[tuple[str, IndexFailure]] = []
     for d in (config.BRAIN_DIR, config.CONTEXT_DIR):
         if not d.exists():
             continue
@@ -699,10 +799,11 @@ def _reindex_all() -> tuple[int, int]:
             # searchable long after the link is gone.
             if not is_contained_file(f, d):
                 continue
-            if index_markdown_file(f):
+            failure = _try_index_markdown(f)
+            if failure is None:
                 indexed += 1
             else:
-                failed += 1
+                failed.append((_failure_path(f), failure))
     if config.MEDIA_DIR.exists():
         for f in config.MEDIA_DIR.rglob("*"):
             if not is_contained_file(f, config.MEDIA_DIR):
@@ -712,16 +813,29 @@ def _reindex_all() -> tuple[int, int]:
             # so a rebuild must restore BOTH — indexing only PDFs would silently
             # drop every image vector on recovery.
             if suffix == ".pdf":
-                indexer = index_pdf_file
+                indexer = _try_index_pdf
             elif suffix in config.ALLOWED_MEDIA_EXTENSIONS:
-                indexer = index_image_file
+                indexer = _try_index_image
             else:
                 continue
-            if indexer(f):
+            failure = indexer(f)
+            if failure is None:
                 indexed += 1
             else:
-                failed += 1
+                failed.append((_failure_path(f), failure))
     return indexed, failed
+
+
+# A fully broken run (quota gone, Qdrant down) fails every file the same way; the
+# list is for acting on, and 20 lines show the pattern without flooding the context.
+_MAX_LISTED_FAILURES = 20
+
+
+def _failure_notice(failure: IndexFailure, subject: str = "this note is") -> str:
+    """The notice a write tool adds when the write succeeded but indexing did not."""
+    then = ("retry via reindex_vault" if failure.retryable
+            else "fix the cause above, then run reindex_vault")
+    return f"Indexing failed ({failure}) — {subject} saved but not yet searchable; {then}."
 
 
 # Serialises full rebuilds. A reindex embeds the whole vault, so two concurrent runs
@@ -755,7 +869,11 @@ async def reindex_vault(arguments: dict) -> list:
         indexed, failed = await asyncio.to_thread(_reindex_all)
     msg = f"Reindexed {indexed} file(s)."
     if failed:
-        msg += f" {failed} file(s) failed — see server log."
+        msg += f" {len(failed)} failed:"
+        msg += "".join(f"\n- {path}: {failure}"
+                       for path, failure in failed[:_MAX_LISTED_FAILURES])
+        if len(failed) > _MAX_LISTED_FAILURES:
+            msg += f"\n... and {len(failed) - _MAX_LISTED_FAILURES} more"
     return text(msg)
 
 
@@ -1057,16 +1175,14 @@ async def write_note(arguments: dict) -> list:
         meta["supersedes"] = supersedes
     post = frontmatter.Post(content, **meta)
     filepath.write_text(frontmatter.dumps(post), encoding="utf-8")
-    indexed = await asyncio.to_thread(index_markdown_file, filepath)
+    failure = await asyncio.to_thread(_try_index_markdown, filepath)
     await enqueue_sync(f"MCP Bot: Wrote {filepath.name}")
 
     out = f"Wrote {filepath.name}"
     if (collision := await asyncio.to_thread(_same_name_notice, filepath)):
         notices.append(collision)
-    if not indexed:
-        notices.append(
-            "Indexing failed — this note is saved but not yet searchable; "
-            "check server logs or retry via reindex_vault.")
+    if failure:
+        notices.append(_failure_notice(failure))
     if notices:
         out += "\nNotices:\n- " + "\n- ".join(notices)
     return text(out)
@@ -1165,7 +1281,7 @@ async def append_to_note(arguments: dict) -> list:
     if existing.meta.get("type") != type_meta:
         updates["type"] = type_meta
     filepath.write_text(_reassemble(existing, combined, updates), encoding="utf-8")
-    indexed = await asyncio.to_thread(index_markdown_file, filepath)
+    failure = await asyncio.to_thread(_try_index_markdown, filepath)
     await enqueue_sync(f"MCP Bot: Appended to {filepath.name}")
     out = f"Appended to {filepath.name}"
     if heading:
@@ -1178,10 +1294,8 @@ async def append_to_note(arguments: dict) -> list:
         # the caller assumed. Creating it beats losing the text, but silently doing so
         # would leave a second section behind whenever the author only renamed one.
         notices.append(f"Section '{heading}' not found in this note — created it at the end.")
-    if not indexed:
-        notices.append(
-            "Indexing failed — this note is saved but not yet searchable; "
-            "check server logs or retry via reindex_vault.")
+    if failure:
+        notices.append(_failure_notice(failure))
     if notices:
         out += "\nNotices:\n- " + "\n- ".join(notices)
     return text(out)
@@ -1218,7 +1332,7 @@ async def rename_note(arguments: dict) -> list:
     # every vector, making it silently unsearchable until the next reindex.
     old_path.rename(new_path)
     deindex_markdown_file(old_path)
-    indexed = await asyncio.to_thread(index_markdown_file, new_path)
+    failure = await asyncio.to_thread(_try_index_markdown, new_path)
     await enqueue_sync(f"MCP Bot: Renamed to {new_path.name}")
     out = f"Renamed to {new_path.name}"
     notices = []
@@ -1227,9 +1341,8 @@ async def rename_note(arguments: dict) -> list:
     if (orphans := await asyncio.to_thread(_backlink_notice, old_path.stem,
                                           new_path.stem, new_path)):
         notices.append(orphans)
-    if not indexed:
-        notices.append("Indexing failed — this note is saved but not yet "
-                       "searchable; check server logs or retry via reindex_vault.")
+    if failure:
+        notices.append(_failure_notice(failure))
     if notices:
         out += "\nNotices:\n- " + "\n- ".join(notices)
     return text(out)
@@ -1297,16 +1410,14 @@ async def upload_media(arguments: dict) -> list:
     await enqueue_sync(f"MCP Bot: Uploaded media {filepath.name}")
     
     if filepath.suffix.lower() == ".pdf":
-        indexed = await asyncio.to_thread(index_pdf_file, filepath)
-        if not indexed:
-            return text(f"Uploaded, but indexing failed: {filepath.name}. The file is saved "
-                        f"but not searchable yet; check server logs or retry via reindex_vault.")
+        failure = await asyncio.to_thread(_try_index_pdf, filepath)
+        if failure:
+            return text(f"Uploaded {filepath.name}. {_failure_notice(failure, 'the file is')}")
         return text(f"Uploaded and indexed PDF successfully: {filepath.name}. You can link it using: [PDF](../media/{filepath.name})")
 
     # Standalone images are indexed too, so `search_vault(vault='media')` can
     # find uploaded images.
-    indexed = await asyncio.to_thread(index_image_file, filepath)
-    if not indexed:
-        return text(f"Uploaded, but indexing failed: {filepath.name}. The file is saved "
-                    f"but not searchable yet; check server logs or retry via reindex_vault.")
+    failure = await asyncio.to_thread(_try_index_image, filepath)
+    if failure:
+        return text(f"Uploaded {filepath.name}. {_failure_notice(failure, 'the file is')}")
     return text(f"Uploaded and indexed successfully. You can link it in markdown using: ![alt text](../media/{filepath.name})")
