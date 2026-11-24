@@ -362,7 +362,7 @@ In total, the server registers **27 tools** across six groups.
 | `get_core_context` | One-call bootstrap: full live context (identity + AI-first rules + skill catalog). Call first in a new session. |
 | `list_skills` | Catalog (Name + `when_to_use`, without body) |
 | `get_skill` | Pull full body on-demand |
-| `write_skill` | Create/update versioned skill (git-persisted) |
+| `write_skill` | Create/update versioned skill (git-persisted); `slash: true` also exposes it as a slash command (MCP prompt) |
 | `delete_skill` | Retire a skill from the catalog (a seed the repo still ships is refused — seeding would reinstall it) |
 
 ### D · Augmentation (Read-Only External Inputs)
@@ -399,6 +399,7 @@ The "push" pillars (identity + AI-first rules + skill catalog) reach the client 
 - **`get_core_context` tool** — returns the **full, live** context (identity + rules + skill catalog) in a single call. Authoritative and always fresh (re-reads the vault every call). The recommended bootstrap: call it **first** in a new session, and **again after a context compaction** (the tool result is exactly the kind of content a summarization step drops; re-calling is cheap and always current).
 - **MCP `instructions` field** — one short bootstrap trigger telling the client to call `get_core_context` first, auto-loaded on connect by spec-compliant clients (e.g. Claude Code). Deliberately *nothing but* the trigger: clients truncate this field to a per-server budget, and with nothing behind the trigger there is nothing to clip. Everything load-bearing — rules, catalog, live identity — comes from `get_core_context`.
 - **Prompt** `agentic_second_brain` — the same full context as a manually-invocable MCP prompt, for slash-command-capable clients (e.g. Cursor).
+- **Skill prompts** — every skill with `slash: true` in its frontmatter is listed as an MCP prompt of the same name, with an optional free-text `context` argument. In Claude Code it is invoked as `/mcp__<server>__<skill>`, e.g. `/mcp__cogitobase__session-capture`; the server name part depends on how the client registered cogitobase (a claude.ai connector shows up as `claude_ai_cogitobase`). The shipped `session-capture` seed is flagged; set the flag on your own skills with `write_skill`.
 
 > **Note on Client Integration:** Not all clients auto-load the `instructions` field. For clients like Antigravity, add a **one-line local rule** that runs `get_core_context` as the first action of every session — **and again after a context compaction/summarization** (e.g. in a `.rule` / project instruction) — the tool returns the complete context, so the rule stays a trivial trigger. Claude Code picks the trigger up automatically via `instructions`; adding the same trigger locally makes the bootstrap independent of that field being read and untruncated. A compaction is invisible to the server (same session, no re-`initialize`), so the client must re-pull the context itself. See [INSTALL.md](INSTALL.md) for the copyable rules.
 

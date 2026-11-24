@@ -21,6 +21,7 @@ from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 from mcp.server import Server
 from mcp.types import (
     Prompt,
+    PromptArgument,
     PromptMessage,
     GetPromptResult,
     TextContent,
@@ -54,16 +55,32 @@ app = Server("cogitobase", version=config.__version__)
 
 @app.list_prompts()
 async def list_prompts() -> list[Prompt]:
+    # The meta prompt, plus one prompt per skill flagged `slash: true` (#16): clients
+    # that list prompts show them as slash commands. Opt-in per skill, so the prompt
+    # list stays a short menu of what the user starts by hand, not the whole catalog.
+    flagged = await asyncio.to_thread(skills.slash_skills)
     return [Prompt(
         name=skills.PROMPT_NAME,
         description="Agentic loop, AI-first vault rules, and your loaded identity/skills context.",
-    )]
+    )] + [Prompt(
+        name=s["name"],
+        description=s["when_to_use"],
+        arguments=[PromptArgument(name=skills.SLASH_ARG, required=False,
+                                  description="Optional input for this run.")],
+    ) for s in flagged]
 
 
 @app.get_prompt()
 async def get_prompt(name: str, arguments: dict | None = None) -> GetPromptResult:
     if name != skills.PROMPT_NAME:
-        raise ValueError(f"Unknown prompt: {name}")
+        extra = (arguments or {}).get(skills.SLASH_ARG)
+        body = await asyncio.to_thread(skills.slash_prompt_text, name, extra)
+        if body is None:
+            raise ValueError(f"Unknown prompt: {name}")
+        return GetPromptResult(
+            description=f"Run the cogitobase skill '{name}'",
+            messages=[PromptMessage(role="user", content=TextContent(type="text", text=body))],
+        )
     # Inject the identity/skills context so every session starts knowing who I am.
     full_prompt = await asyncio.to_thread(skills.build_prompt)
     return GetPromptResult(

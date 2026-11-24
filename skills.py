@@ -176,6 +176,9 @@ def _parse_skill(path):
         "description": meta.get("description", ""),
         "when_to_use": meta.get("when_to_use", meta.get("description", "")),
         "version": meta.get("version", 1),
+        # Opt-in: exposed as an MCP prompt (slash command). Strictly True, so a stray
+        # "yes"/"false" string from a hand edit never turns a skill into a command.
+        "slash": meta.get("slash") is True,
         "body": post.content,
     }
 
@@ -319,11 +322,49 @@ def _scan_skills() -> tuple[list, list[str]]:
             continue
         try:
             s = _parse_skill(f)
-            out.append({k: s[k] for k in ("name", "description", "when_to_use", "version")})
+            out.append({k: s[k] for k in ("name", "description", "when_to_use", "version",
+                                          "slash")})
         except Exception:
             log.exception("Could not parse skill %s", f)
             broken.append(f.name)
     return out, broken
+
+
+SLASH_ARG = "context"
+
+
+def slash_skills() -> list:
+    """Catalog metadata of the skills flagged `slash: true` — the ones exposed as MCP
+    prompts. Same scan as the catalog, so the same containment and parse rules apply."""
+    return [s for s in list_skill_meta() if s["slash"]]
+
+
+def slash_prompt_text(name: str, extra: str | None = None) -> str | None:
+    """The prompt text that runs skill `name` now, or None if no flagged skill has it.
+
+    Read fresh on every call, so a write_skill change applies without a restart. The
+    body is embedded directly: the user asked for this skill by name, which is the
+    explicit pull ADR 3 requires, and a second get_skill round trip would add nothing.
+    """
+    try:
+        path = _skill_name_to_path(name)
+    except ValueError:
+        return None
+    if not is_contained_file(path, config.SKILLS_DIR):
+        return None
+    try:
+        skill = _parse_skill(path)
+    except Exception:
+        log.exception("Could not parse skill %s", path)
+        return None
+    if not skill["slash"]:
+        return None
+    header = (f"Run the cogitobase skill '{skill['name']}' (v{skill['version']}) now, step "
+              f"by step. If get_core_context has not been called in this session yet, call "
+              f"it first.")
+    if extra and extra.strip():
+        header += f"\n\nUser input for this run: {extra.strip()}"
+    return f"{header}\n\n---\n\n{skill['body']}"
 
 
 def skill_catalog_text() -> str:
@@ -403,7 +444,11 @@ async def get_skill_tool(arguments: dict) -> list:
                         "the trigger, not the content."},
         "body": {"type": "string", "description":
                  "The procedure itself, in Markdown — at least 20 characters. Only loaded when "
-                 "get_skill is called, so length here costs nothing per session."}},
+                 "get_skill is called, so length here costs nothing per session."},
+        "slash": {"type": "boolean", "description":
+                  "Expose this skill as an MCP prompt, so clients list it as a slash command "
+                  "(Claude Code: /mcp__<server>__<name>). Omit to keep the current setting "
+                  "when overwriting; a new skill defaults to false."}},
      "required": ["name", "description", "when_to_use", "body"]},
 )
 async def write_skill_tool(arguments: dict) -> list:
@@ -439,20 +484,23 @@ async def write_skill_tool(arguments: dict) -> list:
         return text(f"Skill body is {body_bytes} bytes, over the {config.MAX_FILE_SIZE_BYTES} "
                     f"byte limit (MAX_FILE_SIZE_BYTES). Shorten the procedure, or split it "
                     f"across two skills.", OUTCOME_REJECTED)
-    # Preserve/increment version when updating an existing skill.
-    version = 1
+    # Preserve/increment version when updating an existing skill. The slash flag is
+    # carried over the same way when the call omits it: overwriting a skill to fix its
+    # body must not silently remove the command a user relies on.
+    version, slash = 1, False
     if path.exists():
         try:
-            version = int((await asyncio.to_thread(_parse_skill, path))["version"]) + 1
+            existing = await asyncio.to_thread(_parse_skill, path)
+            version, slash = int(existing["version"]) + 1, existing["slash"]
         except Exception:
             version = 1
-    post = frontmatter.Post(
-        arguments["body"],
-        name=arguments["name"],
-        description=arguments["description"],
-        when_to_use=arguments["when_to_use"],
-        version=version,
-    )
+    if "slash" in arguments:
+        slash = arguments["slash"] is True
+    meta = {"name": arguments["name"], "description": arguments["description"],
+            "when_to_use": arguments["when_to_use"], "version": version}
+    if slash:
+        meta["slash"] = True
+    post = frontmatter.Post(arguments["body"], **meta)
     path.write_text(frontmatter.dumps(post), encoding="utf-8")
     await enqueue_sync(f"MCP Bot: Wrote skill {path.stem} v{version}")
     return text(f"Saved skill '{arguments['name']}' (v{version}).")

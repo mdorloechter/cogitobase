@@ -2,7 +2,8 @@
 name: session-capture
 description: Default-on discipline for capturing what a session produced before it ends.
 when_to_use: "At the end of any session that pushed a commit, opened/merged a PR, touched an issue tracker or documentation, or made a non-trivial architectural choice — before ending, capture what is missing."
-version: 3
+version: 4
+slash: true
 ---
 # Session capture discipline
 
