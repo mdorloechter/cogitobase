@@ -273,6 +273,29 @@ async def test_an_ambiguous_title_is_not_auto_linked(monkeypatch):
     assert "brain-vault/projects/roadmap.md" in out
 
 
+@pytest.mark.parametrize("mode", ["auto", "warn"])
+@pytest.mark.asyncio
+async def test_an_ambiguous_mention_does_not_replace_the_notes_own_title(monkeypatch, mode):
+    """Issue #13: the loop that reports ambiguous titles rebound `title`, so the H1 the
+    server prepends became the last ambiguous mention ('# roadmap') instead of the title
+    the caller passed. The H1 is what other notes link to as [[title]] — a wrong one is
+    silent, and makes several notes carry the same title."""
+    monkeypatch.setattr(config, "VAULT_AUTOLINK", mode)
+    args = {"vault": "brain", "title": "T", "tags": [],
+            "content": "## AI Summary\nSummary line.\n\nBody text."}
+    await call("write_note", {**args, "filename": "roadmap", "type_meta": "concept"})
+    await call("write_note", {**args, "filename": "roadmap", "type_meta": "project"})
+
+    res = await call("write_note", {
+        "vault": "brain", "filename": "plans", "title": "Quarterly Plans",
+        "type_meta": "concept", "tags": [],
+        "content": "## AI Summary\nSummary line.\n\nSee roadmap."})
+    assert "'roadmap' matches several notes" in res[0].text   # the loop did run
+    body = (config.BRAIN_DIR / "concepts" / "plans.md").read_text(encoding="utf-8")
+    assert re.search(r"^# Quarterly Plans$", body, re.MULTILINE), body
+    assert not re.search(r"^# roadmap$", body, re.MULTILINE), body
+
+
 def test_load_identity_skips_symlinked_context_files(tmp_path):
     """Identity text is fed to the model as authoritative instructions, so a link
     here is both a disclosure and an injection vector — and it is read on every

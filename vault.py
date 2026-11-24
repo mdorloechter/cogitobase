@@ -1012,9 +1012,10 @@ async def write_note(arguments: dict) -> list:
             notices.append("Mentions existing notes you could link: "
                            + ", ".join(f"[[{t}]]" for t in suggestions) + ".")
     if config.VAULT_AUTOLINK in ("auto", "warn"):
-        for title in validation.suggest_links(content, ambiguous):
-            paths = ", ".join(vault_qualified_path(p) for p in find_notes(f"{title}.md"))
-            notices.append(f"Not auto-linked: '{title}' matches several notes ({paths}) — "
+        # Not `title`: that is this note's own title, prepended as its H1 below (#13).
+        for shared in validation.suggest_links(content, ambiguous):
+            paths = ", ".join(vault_qualified_path(p) for p in find_notes(f"{shared}.md"))
+            notices.append(f"Not auto-linked: '{shared}' matches several notes ({paths}) — "
                            f"link the one you mean explicitly.")
 
     # Surface a near-duplicate (soft), or reject an almost-identical note (hard).
