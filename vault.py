@@ -308,35 +308,71 @@ def _heading_level(line: str, in_fence: bool) -> int:
     return len(m.group(1)) if m else 0
 
 
-def _append_into_section(body: str, section: str, addition: str) -> tuple[str, bool]:
+_SECTION_ARG_RE = re.compile(r"^(#{1,6})(?!#)\s*(.*)$")
+_CLOSING_HASHES_RE = re.compile(r"(?:^|\s+)#+\s*$")
+
+
+def _parse_section(section: str) -> tuple[int, str]:
+    """Split a `section` argument into (level, title); level 0 means "any level".
+
+    Callers name a section either as it appears in the file ('## Status') or by its name
+    alone ('Status'). Both mean the same section — the notes are read and written by
+    agents that rarely know the heading level without reading the note first.
+    """
+    s = section.strip()
+    m = _SECTION_ARG_RE.match(s)
+    if m:
+        return len(m.group(1)), m.group(2).strip()
+    return 0, s
+
+
+def _heading_key(title: str) -> str:
+    """A heading title reduced to what identifies it: no closing '#'s, no extra
+    whitespace, no case. '## Status ##', '##  status' and 'Status' are one section."""
+    return " ".join(_CLOSING_HASHES_RE.sub("", title).split()).casefold()
+
+
+def _append_into_section(body: str, section: str, addition: str) -> tuple[str, str, bool]:
     """Append `addition` at the END of `section`, before whatever follows it.
 
-    Returns (new body, whether the section had to be created). A section runs from its
-    heading to the next heading of the same or a higher level — appending to the FILE
-    instead files the text under whichever section happens to be last, which is a
-    different section than the one asked for as soon as the note grows one.
+    Returns (new body, the heading line used, whether the section had to be created).
+    A section runs from its heading to the next heading of the same or a higher level —
+    appending to the FILE instead files the text under whichever section happens to be
+    last, which is a different section than the one asked for as soon as the note grows
+    one.
+
+    Matching is by title, ignoring case, spacing and closing '#'s. A heading of the
+    requested level wins; failing that, the same title at any level is used — a second
+    section of the same name fragments the note far worse than a level mismatch does.
+    The first match wins if the heading appears twice.
 
     A missing section is created at the end rather than refused: the caller is a capture
     tool at the end of a session, and losing the entry costs more than a note whose
-    layout the author changed. The first match wins if the heading appears twice.
+    layout the author changed. It is always created as a real heading ('## ' unless a
+    level was given), never as a bare line of text.
     """
-    want = section.strip()
-    want_level = _heading_level(want, False)
+    want_level, title = _parse_section(section)
+    key = _heading_key(title)
     lines = body.splitlines()
-    start, in_fence = None, False
+    headings: list[tuple[int, int]] = []   # (line index, level), fenced lines excluded
+    in_fence = False
     for i, line in enumerate(lines):
         if _FENCE_RE.match(line):
             in_fence = not in_fence
             continue
-        if start is None:
-            if not in_fence and line.strip() == want:
-                start = i
-            continue
-        if 0 < _heading_level(line, in_fence) <= want_level:
-            return "\n".join(_spliced(lines, i, addition)), False
-    if start is None:
-        return _joined(body, f"{want}\n{addition}"), True
-    return "\n".join(_spliced(lines, len(lines), addition)), False
+        level = _heading_level(line, in_fence)
+        if level:
+            headings.append((i, level))
+
+    matches = [(i, lvl) for i, lvl in headings
+               if _heading_key(_HEADING_RE.match(lines[i]).group(2)) == key]
+    if not matches:
+        heading = f"{'#' * (want_level or 2)} {title}"
+        return _joined(body, f"{heading}\n{addition}"), heading, True
+
+    start, level = next((m for m in matches if m[1] == want_level), matches[0])
+    end = next((i for i, lvl in headings if i > start and lvl <= level), len(lines))
+    return "\n".join(_spliced(lines, end, addition)), lines[start].strip(), False
 
 
 def _spliced(lines: list[str], at: int, addition: str) -> list[str]:
@@ -1043,8 +1079,12 @@ async def write_note(arguments: dict) -> list:
                                                   "Markdown to add. The RESULTING note is validated, "
                                                   "so the same rules as write_note apply to it."},
                                       "section": {"type": "string", "description":
-                                                  "Heading to append under, e.g. '## Retros'. "
-                                                  "Created at the end if the note has none. "
+                                                  "Section to append under, with or without "
+                                                  "its leading #s, e.g. 'Retros' or '## Retros'. "
+                                                  "Matched by title, ignoring case and spacing; "
+                                                  "the requested level is preferred, else any "
+                                                  "level. Created as a '## ' heading (or the "
+                                                  "level given) at the end if the note has none. "
                                                   "Omit to append to the end of the note."}},
      "required": ["filename", "content"]},
 )
@@ -1089,8 +1129,12 @@ async def append_to_note(arguments: dict) -> list:
     # end of the file — the note's own summary names where its entries live, and the
     # file end stops being that place the moment the author adds a section below.
     section = (arguments.get("section") or "").strip()
+    heading = ""
     if section:
-        combined, created = _append_into_section(existing.body, section, addition)
+        if not _parse_section(section)[1]:
+            return text(f"Append rejected — section '{section}' names no heading. Pass the "
+                        f"section's title, e.g. 'Status' or '## Status'.", OUTCOME_REJECTED)
+        combined, heading, created = _append_into_section(existing.body, section, addition)
     else:
         combined, created = _joined(existing.body, addition), False
     result = validation.validate_note(vault, type_meta, [], combined, title)
@@ -1123,14 +1167,16 @@ async def append_to_note(arguments: dict) -> list:
     indexed = await asyncio.to_thread(index_markdown_file, filepath)
     await enqueue_sync(f"MCP Bot: Appended to {filepath.name}")
     out = f"Appended to {filepath.name}"
-    if section:
-        out += f" under '{section}'"
+    if heading:
+        # The heading actually used, not the one asked for: 'Status' may have matched
+        # '### Status', and the caller should see that without reading the note back.
+        out += f" under '{heading}'"
     notices = list(result.warnings)
     if created:
         # The author renamed or removed the heading, so the note's layout is not what
         # the caller assumed. Creating it beats losing the text, but silently doing so
         # would leave a second section behind whenever the author only renamed one.
-        notices.append(f"'{section}' did not exist in this note — it was added at the end.")
+        notices.append(f"Section '{heading}' not found in this note — created it at the end.")
     if not indexed:
         notices.append(
             "Indexing failed — this note is saved but not yet searchable; "

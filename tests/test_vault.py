@@ -567,7 +567,7 @@ async def test_a_missing_retro_section_is_created_and_reported():
     res = await call("capture_session_retro", {
         "project": "MCP Server", "shipped": "SECOND", "worked": "w", "friction": "f"})
     assert "Appended" in res[0].text
-    assert "did not exist" in res[0].text
+    assert "Section '## Retros' not found" in res[0].text
     body = path.read_text(encoding="utf-8")
     assert "## Retros" in body and "SECOND" in body
     assert body.index("## Retros") < body.index("SECOND")
@@ -584,10 +584,107 @@ async def test_a_section_append_ignores_a_heading_inside_a_code_fence():
 
     res = await call("append_to_note", {
         "filename": "fenced", "content": "- entry", "section": "## Log"})
-    assert "did not exist" not in res[0].text
+    assert "not found" not in res[0].text
     body = (config.BRAIN_DIR / "projects" / "fenced.md").read_text(encoding="utf-8")
     assert body.index("apt install foo") < body.index("- entry")
     assert "```\n\n- entry" in body      # after the fence closes, not inside it
+
+
+async def _status_note(status_heading: str = "## Status", tail: str = ""):
+    """The note from issue #5: an existing section with content, then the file end."""
+    await call("write_note", {
+        "vault": "brain", "filename": "status-note", "title": "Example Note",
+        "type_meta": "project", "tags": [], "content":
+        f"## AI Summary\nExample summary.\n\n{status_heading}\n- existing bullet\n{tail}"})
+    return config.BRAIN_DIR / "projects" / "status-note.md"
+
+
+@pytest.mark.asyncio
+async def test_a_bare_section_name_appends_under_the_existing_heading():
+    """Issue #5: 'Status' must find '## Status'. Comparing the argument to the heading
+    line verbatim never matched, and the fallback appended a second, plain-text
+    'Status' at the file end — a duplicate section that is not even a heading."""
+    path = await _status_note(tail="\n## Next\n- later\n")
+    res = await call("append_to_note", {
+        "filename": "status-note", "content": "- new bullet", "section": "Status"})
+    assert "not found" not in res[0].text
+    assert "under '## Status'" in res[0].text
+    body = path.read_text(encoding="utf-8")
+    assert body.count("Status") == 1, f"section duplicated:\n{body}"
+    assert body.index("- existing bullet") < body.index("- new bullet") < body.index("## Next")
+
+
+@pytest.mark.parametrize("section,heading", [
+    ("status", "## Status"),
+    ("##  Status ", "## Status"),
+    ("## STATUS", "## Status"),
+    ("Status", "## Status ##"),          # closing ATX sequence in the note
+    ("Status", "##   Status"),
+])
+@pytest.mark.asyncio
+async def test_section_matching_ignores_case_spacing_and_closing_hashes(section, heading):
+    path = await _status_note(status_heading=heading)
+    res = await call("append_to_note", {
+        "filename": "status-note", "content": "- new bullet", "section": section})
+    assert "not found" not in res[0].text, res[0].text
+    body = path.read_text(encoding="utf-8")
+    assert body.casefold().count("status") == 1, f"section duplicated:\n{body}"
+    assert body.index("- existing bullet") < body.index("- new bullet")
+
+
+@pytest.mark.asyncio
+async def test_a_level_mismatch_still_finds_the_section_and_names_the_real_heading():
+    """'### Status' for a note holding '## Status': a second section of the same name
+    fragments the note worse than the level mismatch, and the reply names the heading
+    actually used so the caller need not read the note back."""
+    path = await _status_note()
+    res = await call("append_to_note", {
+        "filename": "status-note", "content": "- new bullet", "section": "### Status"})
+    assert "under '## Status'" in res[0].text
+    assert "not found" not in res[0].text
+    assert path.read_text(encoding="utf-8").count("Status") == 1
+
+
+@pytest.mark.asyncio
+async def test_the_requested_level_wins_when_the_title_appears_at_several_levels():
+    await call("write_note", {
+        "vault": "brain", "filename": "levels", "title": "Levels",
+        "type_meta": "project", "tags": [], "content":
+        "## AI Summary\nx\n\n## Alpha\n### Notes\n- a\n\n## Notes\n- top\n"})
+    await call("append_to_note", {"filename": "levels", "content": "- new", "section": "## Notes"})
+    body = (config.BRAIN_DIR / "projects" / "levels.md").read_text(encoding="utf-8")
+    assert body.index("- top") < body.index("- new")
+
+
+@pytest.mark.asyncio
+async def test_a_subheading_does_not_end_the_section():
+    """The section runs to the next heading of the SAME or higher level as the one
+    found — a '###' inside '## Status' belongs to it."""
+    path = await _status_note(tail="\n### Detail\n- d\n\n## Next\n- later\n")
+    await call("append_to_note", {"filename": "status-note", "content": "- new", "section": "Status"})
+    body = path.read_text(encoding="utf-8")
+    assert body.index("- d") < body.index("- new") < body.index("## Next")
+
+
+@pytest.mark.asyncio
+async def test_a_missing_bare_section_is_created_as_a_real_heading():
+    """The fallback must write a heading, never the bare name as a line of text."""
+    path = await _status_note()
+    res = await call("append_to_note", {
+        "filename": "status-note", "content": "- todo", "section": "Open Questions"})
+    assert "Section '## Open Questions' not found" in res[0].text
+    body = path.read_text(encoding="utf-8")
+    assert "\n## Open Questions\n- todo" in body
+    assert body.count("Open Questions") == 1
+
+
+@pytest.mark.asyncio
+async def test_a_section_argument_with_no_title_is_rejected():
+    path = await _status_note()
+    before = path.read_text(encoding="utf-8")
+    res = await call("append_to_note", {"filename": "status-note", "content": "- x", "section": "##"})
+    assert "names no heading" in res[0].text
+    assert path.read_text(encoding="utf-8") == before
 
 
 def _inbox_body():
